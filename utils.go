@@ -5,7 +5,36 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
+	"text/scanner"
 )
+
+// FormatJSONStr format no-stand json str
+func FormatJSONStr(str string) (string, error) {
+	replacer := strings.NewReplacer("\t", "", "\n", "", "\v", "", "\f", "", "\r", "", " ", "", "'", "\"")
+	str = replacer.Replace(str)
+
+	var s scanner.Scanner
+	s.Init(strings.NewReader(str))
+
+	retStr := ""
+	for s.Scan() != scanner.EOF {
+		token := s.TokenText()
+
+		if s.Peek() == ':' {
+			if !strings.HasPrefix(token, "\"") {
+				token = "\"" + token
+			}
+			if !strings.HasSuffix(token, "\"") {
+				token += "\""
+			}
+		}
+
+		retStr += token
+	}
+
+	return retStr, nil
+}
 
 // EqualFloat64 比较float64 f1 f2可以是字符串或者float64
 func EqualFloat64(f1 interface{}, f2 interface{}) (int, error) {
