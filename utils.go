@@ -3,10 +3,12 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"reflect"
 	"strconv"
 	"strings"
 	"text/scanner"
+	"unsafe"
 )
 
 // FormatJSONStr format no-stand json str
@@ -81,4 +83,28 @@ func parseFloat64(f interface{}) (float64, error) {
 	}
 
 	return ff, nil
+}
+
+// 从source里随机字符生成出长度为n的字符串
+func RandStringN(n int, source string) (str string) {
+	len := len(source)
+	if len == 0 {
+		return
+	}
+
+	for i := 0; i < n; i++ {
+		str += string(source[rand.Intn(len)])
+	}
+
+	return
+}
+
+// 字符串和byte互转 无copy 无垃圾回收
+func s2b(s string) []byte {
+	x := (*[2]uintptr)(unsafe.Pointer(&s))
+	h := [3]uintptr{x[0], x[1], x[1]}
+	return *(*[]byte)(unsafe.Pointer(&h))
+}
+func b2s(b []byte) string {
+	return *(*string)(unsafe.Pointer(&b))
 }

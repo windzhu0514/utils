@@ -66,6 +66,10 @@ func AESDecrypt(src, key []byte) ([]byte, error) {
 
 	dst := make([]byte, len(src))
 	blockMode := cipher.NewCBCDecrypter(block, commonIV)
+	if len(src)%blockMode.BlockSize() != 0 {
+		return nil, errors.New("crypto/cipher: input not full blocks")
+	}
+
 	blockMode.CryptBlocks(dst, src)
 	dst = PKCS7UnPadding(dst)
 
@@ -112,6 +116,9 @@ func DesDecrypt(crypted, key []byte) ([]byte, error) {
 		return nil, err
 	}
 	blockMode := cipher.NewCBCDecrypter(block, key)
+	if len(crypted)%blockMode.BlockSize() != 0 {
+		return nil, errors.New("crypto/cipher: input not full blocks")
+	}
 	//origData := make([]byte, len(crypted))
 	origData := crypted
 	blockMode.CryptBlocks(origData, crypted)
