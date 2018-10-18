@@ -6,7 +6,6 @@ import (
 
 type Limitwaitgroup struct {
 	sem chan struct{}
-	mux sync.Mutex
 	wg  sync.WaitGroup
 }
 
@@ -16,22 +15,16 @@ func New(n int) *Limitwaitgroup {
 	}
 }
 
-func (l *Limitwaitgroup) Add(delta int) {
+func (l *Limitwaitgroup) Add() {
 	l.sem <- struct{}{}
-	l.mux.Lock()
-	defer l.mux.Unlock()
-	l.wg.Add(delta)
+	l.wg.Add(1)
 }
 
 func (l *Limitwaitgroup) Done() {
 	<-l.sem
-	l.mux.Lock()
-	defer l.mux.Unlock()
 	l.wg.Done()
 }
 
 func (l *Limitwaitgroup) Wait() {
-	l.mux.Lock()
-	defer l.mux.Unlock()
 	l.wg.Wait()
 }
