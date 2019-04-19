@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"text/scanner"
+	"time"
 	"unsafe"
 )
 
@@ -100,11 +101,30 @@ func RandStringN(n int, source string) (str string) {
 }
 
 // 字符串和byte互转 无copy 无垃圾回收
-func s2b(s string) []byte {
+func S2b(s string) []byte {
 	x := (*[2]uintptr)(unsafe.Pointer(&s))
 	h := [3]uintptr{x[0], x[1], x[1]}
 	return *(*[]byte)(unsafe.Pointer(&h))
 }
-func b2s(b []byte) string {
+func B2s(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
+}
+
+// 控制台等待动画
+func wait(duration time.Duration) {
+	timer := time.After(duration)
+	for {
+		select {
+		case <-timer:
+			fmt.Printf("\r")
+			return
+		default:
+		}
+
+		for _, c := range "/-\\|" {
+			fmt.Printf("\r%c", c)
+			time.Sleep(time.Second)
+		}
+	}
+
 }
