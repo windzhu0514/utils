@@ -11,9 +11,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/windzhu0514/utils/httpclient/httpclient"
 )
+
+import "github.com/windzhu0514/utils/httpclient/httpclient"
 
 func main() {
 

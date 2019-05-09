@@ -45,10 +45,10 @@ var defaultSetting = HttpSettings{
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		IdleConnTimeout:     idleConnTimeout,
 	},
-	// Proxy: func(req *http.Request) (*url.URL, error) {
-	// 	u, _ := url.ParseRequestURI("http://127.0.0.1:8888")
-	// 	return u, nil
-	// },
+	Proxy: func(req *http.Request) (*url.URL, error) {
+		u, _ := url.ParseRequestURI("http://127.0.0.1:8888")
+		return u, nil
+	},
 }
 
 var defaultCookieJar http.CookieJar
