@@ -1,25 +1,30 @@
 package main
 
 import (
+	"fmt"
 	_ "net/http/pprof"
+	"net/url"
 
 	"github.com/windzhu0514/utils/hihttp/hihttp"
 )
 
 func main() {
-	// _, resp, err := hihttp.Get("http://www.baidu.com")
+	hihttp.SetProxy("http://127.0.0.1:8888")
+	// req := hihttp.NewRequest(http.MethodGet, "http://www.baidu.com", nil)
+	// resp, err := req.Do()
 	// if err != nil {
-	// 	fmt.Printf("请求失败:%s\n", err.Error())
-	// } else {
-	// 	fmt.Println("resp:" + string(resp))
+	// 	fmt.Println(err)
+	// 	return
 	// }
-	// req := httpclient.Get("https://www.baidu.com")
-	// resp2, err := req.String()
-	// if err != nil {
-	// 	fmt.Printf("请求失败:%s\n", err.Error())
-	// } else {
-	// 	fmt.Println("resp:" + string(resp2))
-	// }
+	//
+	// fmt.Println(resp.Body())
 
-	hihttp.NewRequest("哈哈", "")
+	v := url.Values{}
+	v.Add("jsonStr", "jsonStr")
+	statusCode, resp, err := hihttp.Post("http://47.110.127.250:6600/proxy", v.Encode(), hihttp.CTApplicationForm)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println(statusCode, string(resp))
 }

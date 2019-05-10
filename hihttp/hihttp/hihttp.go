@@ -1,31 +1,38 @@
 // transport复用
 // 重试
-// 设置代理
 // 请求可添加删除cookie
-// 可设置单个请求的超时时间
 // 参数按添加顺序发送
-// head不自动规范化
 // 支持debug模式https://github.com/kirinlabs/HttpRequest
 // request重复使用
+// 文件上传
+
+// head不自动规范化
+// 设置代理
+// 可设置单个请求的超时时间
+// 设置重定向检查
 package hihttp
 
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/base64"
+	"errors"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strings"
 	"time"
 )
 
 var (
-	defaultDialTimeout     time.Duration = 30 * time.Second
-	defaultResponseTimeout time.Duration
-	disableCookie          bool
+	defaultDialTimeout       time.Duration = 30 * time.Second
+	defaultResponseTimeout   time.Duration
+	defaultProxy             httpProxy
+	disableCookie            bool
+	defaultKeepParamAddOrder bool
+	defaultDisableKeepAlives bool
 )
 
 // set default timeout
@@ -36,6 +43,14 @@ func SetTimeout(dialTimeout, responseTimeout time.Duration) {
 
 func DisableCookie() {
 	disableCookie = true
+}
+
+func KeepParamAddOrder() {
+	defaultKeepParamAddOrder = true
+}
+
+func DisableKeepAlives() {
+	defaultDisableKeepAlives = true
 }
 
 type httpProxy struct {
@@ -54,8 +69,7 @@ func (p *httpProxy) IsZero() bool {
 	return p.isAuthProxy && p.ip == "" || !p.isAuthProxy && p.proxyURL == ""
 }
 
-var defaultProxy httpProxy
-
+// http://127.0.0.1:8888
 func SetProxy(proxyURL string) {
 	defaultProxy.isAuthProxy = false
 	defaultProxy.proxyURL = proxyURL
@@ -68,6 +82,23 @@ func SetAuthProxy(username, password, ip, port string) {
 	defaultProxy.password = password
 	defaultProxy.ip = ip
 	defaultProxy.port = port
+}
+
+// Content-Type
+const (
+	CTTextHtml          = "text/html"
+	CTTextPlain         = "text/plain"
+	CTApplicationJson   = "application/json"
+	CTApplicationXml    = "application/xml"
+	CTApplicationForm   = "application/x-www-form-urlencoded"
+	CTApplicationStream = "application/octet-stream"
+	CTMultipartFormData = "multipart/form-data"
+)
+
+var defaultContentType = CTTextPlain
+
+func SetContentType(contentType string) {
+	defaultContentType = contentType
 }
 
 var defaultTransport = http.Transport{
@@ -94,134 +125,90 @@ var DefaultClient = &http.Client{
 	Timeout:       defaultResponseTimeout,
 }
 
-type param struct {
-	key   string
-	value string
-}
-
 type Request struct {
-	url    string
-	req    *http.Request
-	params []param
+	url         string
+	method      string
+	heads       http.Header
+	params      url.Values
+	paramsOrder []string
+	body        io.Reader
 
-	dialTimeout     time.Duration
-	responseTimeout time.Duration
+	contentType       string
+	dialTimeout       time.Duration
+	responseTimeout   time.Duration
+	keepParamAddOrder bool
 
 	checkRedirect func(req *http.Request, via []*http.Request) error
 
 	files  map[string]string
 	resp   *http.Response
-	body   []byte
 	dump   []byte
 	client *http.Client
-	proxy  httpProxy
 }
 
-type Response struct {
-	resp *http.Response
-	err  error
-}
-
-func NewRequest(method, url string) *Request {
+func NewRequest(method, url string, body io.Reader) *Request {
 	var req Request
+	req.method = method
+	req.url = url
+	req.body = body
 
-	var err error
-	req.req, err = http.NewRequest(method, url, nil)
-	if err != nil {
-		panic(err)
-	}
+	// var err error
+	// req.req, err = http.NewRequest(method, url, body)
+	// if err != nil {
+	// 	panic(err)
+	// }
 
-	return &Request{}
+	return &req
 }
 
 // key is canonical form of MIME-style
 func (r *Request) Head(key, value string) {
-	r.req.Header.Add(key, value)
+	r.heads.Add(key, value)
 }
 
 // key is noncanonical form
 func (r *Request) RawHead(key, value string) {
-	r.req.Header[key] = append(r.req.Header[key], value)
+	r.heads[key] = append(r.heads[key], value)
 }
 
-// 可重复
 func (r *Request) Param(key, value string) {
-	r.params = append(r.params, param{key, value})
-}
-
-// proxyURL:http://127.0.0.1:8888
-func (r *Request) SetProxy(proxyURL string) {
-	if r.proxy != nil {
-		panic("proxy is already set")
-	}
-
-	r.proxy = func(req *http.Request) (*url.URL, error) {
-		u, _ := url.ParseRequestURI(proxyURL)
-		return u, nil
-	}
-}
-
-// AuthProxy
-func (r *Request) SetAuthProxy(username, password, ip, port string) {
-	if r.proxy != nil {
-		panic("proxy is already set")
-	}
-
-	auth := username + ":" + password
-	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
-	r.Head("Proxy-Authorization", basic)
-
-	proxyURL := "http://" + ip + ":" + port
-	r.proxy = func(req *http.Request) (*url.URL, error) {
-		u, _ := url.ParseRequestURI(proxyURL)
-		u.User = url.UserPassword(username, password)
-		return u, nil
-	}
+	r.params.Add(key, value)
+	r.paramsOrder = append(r.paramsOrder, key)
 }
 
 func (r *Request) SetCheckRedirect(checkRedirect func(req *http.Request, via []*http.Request) error) {
 	r.checkRedirect = checkRedirect
 }
 
-func (r *Request) Do() *Response {
+func (r *Request) KeepParamAddOrder() {
+	r.keepParamAddOrder = true
+}
+
+func (r *Request) Do() (*Response, error) {
 
 	client := &http.Client{
 		Transport: &defaultTransport,
 	}
-
-	dialTimeout := defaultDialTimeout
-	if r.dialTimeout > 0 {
-		dialTimeout = r.dialTimeout
-	}
-
-	defaultTransport.DialContext = (&net.Dialer{
-		Timeout:   dialTimeout,
-		KeepAlive: 30 * time.Second,
-	}).DialContext
 
 	client.Timeout = defaultResponseTimeout
 	if r.responseTimeout > 0 {
 		client.Timeout = r.responseTimeout
 	}
 
-	if !r.proxy.IsZero() {
-		if r.proxy.isAuthProxy {
-			auth := r.proxy.username + ":" + r.proxy.password
-			basic := "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
-			r.Head("Proxy-Authorization", basic)
-
-			proxyURL := "http://" + r.proxy.ip + ":" + r.proxy.port
+	if !defaultProxy.IsZero() {
+		if defaultProxy.isAuthProxy {
+			proxyURL := "http://" + defaultProxy.ip + ":" + defaultProxy.port
 			defaultTransport.Proxy = func(req *http.Request) (*url.URL, error) {
 				u, _ := url.ParseRequestURI(proxyURL)
-				u.User = url.UserPassword(r.proxy.username, r.proxy.password)
+				u.User = url.UserPassword(defaultProxy.username, defaultProxy.password)
 				return u, nil
 			}
 		} else {
-			http.ProxyURL()
+			defaultTransport.Proxy = func(req *http.Request) (*url.URL, error) {
+				u, _ := url.ParseRequestURI(defaultProxy.proxyURL)
+				return u, nil
+			}
 		}
-		defaultTransport.Proxy = r.proxy
-	} else {
-
 	}
 
 	if !disableCookie {
@@ -232,54 +219,141 @@ func (r *Request) Do() *Response {
 		client.CheckRedirect = r.checkRedirect
 	}
 
-	var resp Response
-	resp.resp, resp.err = client.Do(r.req)
-
-	return nil
-}
-
-func Get(url string) (statusCode int, resp []byte, err error) {
-	req := NewRequest(http.MethodGet, url)
-
-	var response *http.Response
-	response, err = DefaultClient.Do(req.req)
+	req, err := http.NewRequest(r.method, r.url, r.body)
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	defer response.Body.Close()
-
-	statusCode = response.StatusCode
-
-	if response.Header.Get("Content-Encoding") == "gzip" {
-		var reader *gzip.Reader
-		reader, err = gzip.NewReader(response.Body)
-		if err != nil {
-			return
+	if r.heads != nil {
+		for key, value := range r.heads {
+			req.Header[key] = value
 		}
-		resp, err = ioutil.ReadAll(reader)
+	}
+
+	keepParamAddOrder := defaultKeepParamAddOrder || r.keepParamAddOrder
+	var queryParam string
+	if keepParamAddOrder {
+		if r.params != nil {
+			len := len(r.paramsOrder)
+			var buf strings.Builder
+			for i := 0; i < len; i++ {
+				vs := r.params[r.paramsOrder[i]]
+				keyEscaped := url.QueryEscape(r.paramsOrder[i])
+				for _, v := range vs {
+					if buf.Len() > 0 {
+						buf.WriteByte('&')
+					}
+					buf.WriteString(keyEscaped)
+					buf.WriteByte('=')
+					buf.WriteString(url.QueryEscape(v))
+				}
+			}
+			queryParam = buf.String()
+		}
 	} else {
-		resp, err = ioutil.ReadAll(response.Body)
+		queryParam = r.params.Encode()
+	}
+
+	if strings.Index(r.url, "?") == -1 {
+		r.url = r.url + "?" + queryParam
+	} else {
+		if strings.HasSuffix(r.url, "&") {
+			r.url += queryParam
+		} else {
+			r.url += "&" + queryParam
+		}
+	}
+
+	if req.Method == http.MethodPost && r.contentType != "" {
+		req.Header.Set("Content-Type", r.contentType)
+	}
+
+	var resp Response
+	resp.resp, err = client.Do(req)
+
+	return &resp, err
+}
+
+type Response struct {
+	resp *http.Response
+	err  error
+}
+
+// r 判空
+func (r *Response) StatusCode() int {
+	if r == nil || r.resp == nil {
+		return 0
+	}
+
+	return r.resp.StatusCode
+}
+
+func (r *Response) Headers() http.Header {
+	if r == nil || r.resp == nil {
+		return nil
+	}
+
+	return r.resp.Header
+}
+
+func (r *Response) Cookie() []*http.Cookie {
+	if r == nil || r.resp == nil {
+		return nil
+	}
+
+	return r.resp.Cookies()
+}
+
+func (r *Response) Location() (string, error) {
+	if r == nil || r.resp == nil {
+		return "", errors.New("hihttp:http response is nil pointer")
+	}
+
+	location, err := r.resp.Location()
+	if err != nil {
+		return "", err
+	}
+
+	return location.String(), nil
+}
+
+// 超时时间包括body的读取 请求结束后要尽快读取
+func (r *Response) Body() (body []byte, err error) {
+	if r == nil || r.resp == nil {
+		return nil, errors.New("hihttp:http response is nil pointer")
+	}
+
+	if r.resp.Body == nil {
+		return nil, nil
+	}
+
+	defer r.resp.Body.Close()
+	if r.resp.Header.Get("Content-Encoding") == "gzip" {
+		reader, err := gzip.NewReader(r.resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		body, err = ioutil.ReadAll(reader)
+	} else {
+		body, err = ioutil.ReadAll(r.resp.Body)
 	}
 
 	return
 }
 
-// Content-Type
-const (
-	CTTextHtml          = "text/html"
-	CTTextPlain         = "text/plain"
-	CTApplicationJson   = "application/json"
-	CTApplicationXml    = "application/xml"
-	CTApplicationForm   = "application/x-www-form-urlencoded"
-	CTApplicationStream = "application/octet-stream"
-	CTMultipartFormData = "multipart/form-data"
-)
+func Get(url string) (statusCode int, resp []byte, err error) {
+	req := NewRequest(http.MethodGet, url, nil)
 
-var defaultContentType = CTTextPlain
+	var response *Response
+	response, err = req.Do()
+	if err != nil {
+		return
+	}
 
-func SetContentType(contentType string) {
-	defaultContentType = contentType
+	statusCode = response.StatusCode()
+	resp, err = response.Body()
+
+	return
 }
 
 func Post(url string, data interface{}, contentType ...string) (statusCode int, resp []byte, err error) {
@@ -300,38 +374,26 @@ func Post(url string, data interface{}, contentType ...string) (statusCode int, 
 		panic("post data must be string or []byte")
 	}
 
-	var req *http.Request
-	req, err = http.NewRequest(http.MethodPost, url, body)
+	req := NewRequest(http.MethodPost, url, body)
 	if err != nil {
 		return
 	}
 
 	if len(contentType) < 0 {
-		req.Header.Set("Content-Type", defaultContentType)
+		req.contentType = defaultContentType
 	} else {
-		req.Header.Set("Content-Type", contentType[0])
+		req.contentType = contentType[0]
 	}
 
-	var response *http.Response
-	response, err = DefaultClient.Do(req)
+	var response *Response
+	response, err = req.Do()
 	if err != nil {
 		return
 	}
 
-	defer response.Body.Close()
+	statusCode = response.resp.StatusCode
 
-	statusCode = response.StatusCode
-
-	if response.Header.Get("Content-Encoding") == "gzip" {
-		var reader *gzip.Reader
-		reader, err = gzip.NewReader(response.Body)
-		if err != nil {
-			return
-		}
-		data, err = ioutil.ReadAll(reader)
-	} else {
-		data, err = ioutil.ReadAll(response.Body)
-	}
+	resp, err = response.Body()
 
 	return
 }
