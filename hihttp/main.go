@@ -5,7 +5,7 @@ import (
 	_ "net/http/pprof"
 	"net/url"
 
-	"github.com/windzhu0514/utils/hihttp/hihttp"
+	"github.com/windzhu0514/go-utils/hihttp/hihttp"
 )
 
 func main() {
@@ -21,7 +21,8 @@ func main() {
 
 	v := url.Values{}
 	v.Add("jsonStr", "jsonStr")
-	statusCode, resp, err := hihttp.Post("http://47.110.127.250:6600/proxy", v.Encode(), hihttp.CTApplicationForm)
+	statusCode, resp, err := hihttp.Post("http://47.110.127.250:6600/proxy", v.Encode(), hihttp.PostOption{
+		ContentType: hihttp.CTApplicationForm})
 	if err != nil {
 		fmt.Println(err)
 	}

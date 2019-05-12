@@ -1,27 +1,32 @@
-// transport复用
 // 重试
-// 请求可添加删除cookie
-// 参数按添加顺序发送
-// 支持debug模式https://github.com/kirinlabs/HttpRequest
-// request重复使用
+// 支持debug模式https://github.com/kirinlabs/HttpRequest 打印请求和请求的ID
 // 文件上传
 
+// 参数按添加顺序发送
+// 连接复用
 // head不自动规范化
 // 设置代理
-// 可设置单个请求的超时时间
+// 设置单个请求的超时时间
 // 设置重定向检查
+// request重复使用
+// post多种数据类型
+// body json解析 存入文件
+// 添加cookie
 package hihttp
 
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -30,7 +35,7 @@ var (
 	defaultDialTimeout       time.Duration = 30 * time.Second
 	defaultResponseTimeout   time.Duration
 	defaultProxy             httpProxy
-	disableCookie            bool
+	defaultDisableCookie     bool
 	defaultKeepParamAddOrder bool
 	defaultDisableKeepAlives bool
 )
@@ -42,7 +47,7 @@ func SetTimeout(dialTimeout, responseTimeout time.Duration) {
 }
 
 func DisableCookie() {
-	disableCookie = true
+	defaultDisableCookie = true
 }
 
 func KeepParamAddOrder() {
@@ -111,6 +116,7 @@ var defaultTransport = http.Transport{
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
+	DisableKeepAlives:     defaultDisableKeepAlives,
 }
 
 var defaultCookieJar = func() http.CookieJar {
@@ -132,18 +138,19 @@ type Request struct {
 	params      url.Values
 	paramsOrder []string
 	body        io.Reader
+	cookies     []*http.Cookie
 
 	contentType       string
 	dialTimeout       time.Duration
 	responseTimeout   time.Duration
 	keepParamAddOrder bool
+	disableCookie     bool
 
 	checkRedirect func(req *http.Request, via []*http.Request) error
 
-	files  map[string]string
-	resp   *http.Response
-	dump   []byte
-	client *http.Client
+	files map[string]string
+	resp  *http.Response
+	dump  []byte
 }
 
 func NewRequest(method, url string, body io.Reader) *Request {
@@ -180,8 +187,16 @@ func (r *Request) SetCheckRedirect(checkRedirect func(req *http.Request, via []*
 	r.checkRedirect = checkRedirect
 }
 
+func (r *Request) AddCookie(c *http.Cookie) {
+	r.cookies = append(r.cookies, c)
+}
+
 func (r *Request) KeepParamAddOrder() {
 	r.keepParamAddOrder = true
+}
+
+func (r *Request) DisableCookie() {
+	r.disableCookie = true
 }
 
 func (r *Request) Do() (*Response, error) {
@@ -209,10 +224,6 @@ func (r *Request) Do() (*Response, error) {
 				return u, nil
 			}
 		}
-	}
-
-	if !disableCookie {
-		client.Jar = defaultCookieJar
 	}
 
 	if r.checkRedirect != nil {
@@ -266,6 +277,12 @@ func (r *Request) Do() (*Response, error) {
 
 	if req.Method == http.MethodPost && r.contentType != "" {
 		req.Header.Set("Content-Type", r.contentType)
+	}
+
+	disableCookie := defaultDisableCookie || r.disableCookie
+	if !disableCookie {
+		defaultCookieJar.SetCookies(req.URL, r.cookies)
+		client.Jar = defaultCookieJar
 	}
 
 	var resp Response
@@ -341,6 +358,31 @@ func (r *Response) Body() (body []byte, err error) {
 	return
 }
 
+func (r *Response) FromJson(v interface{}) error {
+	resp, err := r.Body()
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(resp, v)
+}
+
+func (r *Response) ToFile(filename string) error {
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	resp, err := r.Body()
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(f, bytes.NewReader(resp))
+	return err
+}
+
 func Get(url string) (statusCode int, resp []byte, err error) {
 	req := NewRequest(http.MethodGet, url, nil)
 
@@ -356,12 +398,20 @@ func Get(url string) (statusCode int, resp []byte, err error) {
 	return
 }
 
-func Post(url string, data interface{}, contentType ...string) (statusCode int, resp []byte, err error) {
+type PostOption struct {
+	ContentType    string
+	JsonEscapeHTML bool
+}
+
+func Post(url string, data interface{}, opt ...PostOption) (statusCode int, resp []byte, err error) {
 
 	var body io.Reader
 	switch t := data.(type) {
 	case string:
 		bf := bytes.NewBufferString(t)
+		body = ioutil.NopCloser(bf)
+	case fmt.Stringer:
+		bf := bytes.NewBufferString(t.String())
 		body = ioutil.NopCloser(bf)
 	case []byte:
 		bf := bytes.NewBuffer(t)
@@ -371,7 +421,15 @@ func Post(url string, data interface{}, contentType ...string) (statusCode int, 
 	case nil:
 		body = nil
 	default:
-		panic("post data must be string or []byte")
+		buf := bytes.NewBuffer(nil)
+		enc := json.NewEncoder(buf)
+		if len(opt) > 0 {
+			enc.SetEscapeHTML(opt[0].JsonEscapeHTML)
+		}
+		if err = enc.Encode(data); err != nil {
+			return
+		}
+		body = ioutil.NopCloser(buf)
 	}
 
 	req := NewRequest(http.MethodPost, url, body)
@@ -379,10 +437,10 @@ func Post(url string, data interface{}, contentType ...string) (statusCode int, 
 		return
 	}
 
-	if len(contentType) < 0 {
+	if len(opt) < 0 {
 		req.contentType = defaultContentType
 	} else {
-		req.contentType = contentType[0]
+		req.contentType = opt[0].ContentType
 	}
 
 	var response *Response
@@ -392,7 +450,6 @@ func Post(url string, data interface{}, contentType ...string) (statusCode int, 
 	}
 
 	statusCode = response.resp.StatusCode
-
 	resp, err = response.Body()
 
 	return
