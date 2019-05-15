@@ -1,6 +1,7 @@
 // 重试
 // 支持debug模式https://github.com/kirinlabs/HttpRequest 打印请求和请求的ID
 // 文件上传
+// requestwithcontext
 
 // 参数按添加顺序发送
 // 连接复用
@@ -17,6 +18,7 @@ package hihttp
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +36,8 @@ import (
 var (
 	defaultDialTimeout       time.Duration = 30 * time.Second
 	defaultResponseTimeout   time.Duration
-	defaultProxy             httpProxy
+	defaultProxy             = make(map[string]httpProxy)
+	defaultProxyKey          = "defaultProxyKey"
 	defaultDisableCookie     bool
 	defaultKeepParamAddOrder bool
 	defaultDisableKeepAlives bool
@@ -74,19 +77,43 @@ func (p *httpProxy) IsZero() bool {
 	return p.isAuthProxy && p.ip == "" || !p.isAuthProxy && p.proxyURL == ""
 }
 
-// http://127.0.0.1:8888
-func SetProxy(proxyURL string) {
-	defaultProxy.isAuthProxy = false
-	defaultProxy.proxyURL = proxyURL
+// Proxy：http://127.0.0.1:8888
+func SetProxy(proxyURL string, urls ...string) {
+	hp := httpProxy{isAuthProxy: false, proxyURL: proxyURL}
+
+	n := len(urls)
+	if n == 0 {
+		defaultProxy[defaultProxyKey] = hp
+	} else {
+		for _, rawURL := range urls {
+			URL, err := url.Parse(rawURL)
+			if err == nil {
+				defaultProxy[URL.Hostname()] = hp
+			}
+		}
+	}
 }
 
 // AuthProxy
-func SetAuthProxy(username, password, ip, port string) {
-	defaultProxy.isAuthProxy = true
-	defaultProxy.username = username
-	defaultProxy.password = password
-	defaultProxy.ip = ip
-	defaultProxy.port = port
+func SetAuthProxy(username, password, ip, port string, urls ...string) {
+	var hp httpProxy
+	hp.isAuthProxy = true
+	hp.username = username
+	hp.password = password
+	hp.ip = ip
+	hp.port = port
+
+	n := len(urls)
+	if n == 0 {
+		defaultProxy[defaultProxyKey] = hp
+	} else {
+		for _, rawURL := range urls {
+			URL, err := url.Parse(rawURL)
+			if err == nil {
+				defaultProxy[URL.Hostname()] = hp
+			}
+		}
+	}
 }
 
 // Content-Type
@@ -147,6 +174,7 @@ type Request struct {
 	disableCookie     bool
 
 	checkRedirect func(req *http.Request, via []*http.Request) error
+	ctx           context.Context
 
 	files map[string]string
 	resp  *http.Response
@@ -187,6 +215,10 @@ func (r *Request) SetCheckRedirect(checkRedirect func(req *http.Request, via []*
 	r.checkRedirect = checkRedirect
 }
 
+func (r *Request) WithContext(ctx context.Context) {
+	r.ctx = ctx
+}
+
 func (r *Request) AddCookie(c *http.Cookie) {
 	r.cookies = append(r.cookies, c)
 }
@@ -197,6 +229,52 @@ func (r *Request) KeepParamAddOrder() {
 
 func (r *Request) DisableCookie() {
 	r.disableCookie = true
+}
+
+func (r *Request) proxyFunc() func(*http.Request) (*url.URL, error) {
+	return func(r *http.Request) (*url.URL, error) {
+		if r == nil || r.URL == nil || len(defaultProxy) == 0 {
+			return nil, nil
+		}
+
+		hp, ok := defaultProxy[r.URL.Hostname()]
+		if ok {
+			if hp.IsZero() {
+				return nil, nil
+			}
+
+			if hp.isAuthProxy {
+				proxyURL := "http://" + hp.ip + ":" + hp.port
+				u, _ := url.ParseRequestURI(proxyURL)
+				u.User = url.UserPassword(hp.username, hp.password)
+				return u, nil
+			} else {
+				u, _ := url.ParseRequestURI(hp.proxyURL)
+				return u, nil
+			}
+
+		} else {
+			dhp, ok := defaultProxy[defaultProxyKey]
+			if ok {
+				if dhp.IsZero() {
+					return nil, nil
+				}
+
+				if dhp.isAuthProxy {
+					proxyURL := "http://" + dhp.ip + ":" + dhp.port
+					u, _ := url.ParseRequestURI(proxyURL)
+					u.User = url.UserPassword(dhp.username, dhp.password)
+					return u, nil
+				} else {
+					u, _ := url.ParseRequestURI(dhp.proxyURL)
+					return u, nil
+				}
+
+			}
+		}
+
+		return nil, nil
+	}
 }
 
 func (r *Request) Do() (*Response, error) {
@@ -210,21 +288,7 @@ func (r *Request) Do() (*Response, error) {
 		client.Timeout = r.responseTimeout
 	}
 
-	if !defaultProxy.IsZero() {
-		if defaultProxy.isAuthProxy {
-			proxyURL := "http://" + defaultProxy.ip + ":" + defaultProxy.port
-			defaultTransport.Proxy = func(req *http.Request) (*url.URL, error) {
-				u, _ := url.ParseRequestURI(proxyURL)
-				u.User = url.UserPassword(defaultProxy.username, defaultProxy.password)
-				return u, nil
-			}
-		} else {
-			defaultTransport.Proxy = func(req *http.Request) (*url.URL, error) {
-				u, _ := url.ParseRequestURI(defaultProxy.proxyURL)
-				return u, nil
-			}
-		}
-	}
+	defaultTransport.Proxy = r.proxyFunc
 
 	if r.checkRedirect != nil {
 		client.CheckRedirect = r.checkRedirect
@@ -233,6 +297,10 @@ func (r *Request) Do() (*Response, error) {
 	req, err := http.NewRequest(r.method, r.url, r.body)
 	if err != nil {
 		return nil, err
+	}
+
+	if r.ctx != nil {
+		req = req.WithContext(r.ctx)
 	}
 
 	if r.heads != nil {
