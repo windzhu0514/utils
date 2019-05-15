@@ -36,8 +36,6 @@ import (
 var (
 	defaultDialTimeout       time.Duration = 30 * time.Second
 	defaultResponseTimeout   time.Duration
-	defaultProxy             = make(map[string]httpProxy)
-	defaultProxyKey          = "defaultProxyKey"
 	defaultDisableCookie     bool
 	defaultKeepParamAddOrder bool
 	defaultDisableKeepAlives bool
@@ -61,6 +59,9 @@ func DisableKeepAlives() {
 	defaultDisableKeepAlives = true
 }
 
+var httpProxys = make(map[string]httpProxy)
+var defaultProxyKey = "defaultProxyKey"
+
 type httpProxy struct {
 	isAuthProxy bool
 	// isAuthProxy=false
@@ -83,12 +84,12 @@ func SetProxy(proxyURL string, urls ...string) {
 
 	n := len(urls)
 	if n == 0 {
-		defaultProxy[defaultProxyKey] = hp
+		httpProxys[defaultProxyKey] = hp
 	} else {
 		for _, rawURL := range urls {
 			URL, err := url.Parse(rawURL)
 			if err == nil {
-				defaultProxy[URL.Hostname()] = hp
+				httpProxys[URL.Hostname()] = hp
 			}
 		}
 	}
@@ -105,12 +106,12 @@ func SetAuthProxy(username, password, ip, port string, urls ...string) {
 
 	n := len(urls)
 	if n == 0 {
-		defaultProxy[defaultProxyKey] = hp
+		httpProxys[defaultProxyKey] = hp
 	} else {
 		for _, rawURL := range urls {
 			URL, err := url.Parse(rawURL)
 			if err == nil {
-				defaultProxy[URL.Hostname()] = hp
+				httpProxys[URL.Hostname()] = hp
 			}
 		}
 	}
@@ -231,50 +232,32 @@ func (r *Request) DisableCookie() {
 	r.disableCookie = true
 }
 
-func (r *Request) proxyFunc() func(*http.Request) (*url.URL, error) {
-	return func(r *http.Request) (*url.URL, error) {
-		if r == nil || r.URL == nil || len(defaultProxy) == 0 {
-			return nil, nil
-		}
-
-		hp, ok := defaultProxy[r.URL.Hostname()]
-		if ok {
-			if hp.IsZero() {
-				return nil, nil
-			}
-
-			if hp.isAuthProxy {
-				proxyURL := "http://" + hp.ip + ":" + hp.port
-				u, _ := url.ParseRequestURI(proxyURL)
-				u.User = url.UserPassword(hp.username, hp.password)
-				return u, nil
-			} else {
-				u, _ := url.ParseRequestURI(hp.proxyURL)
-				return u, nil
-			}
-
-		} else {
-			dhp, ok := defaultProxy[defaultProxyKey]
-			if ok {
-				if dhp.IsZero() {
-					return nil, nil
-				}
-
-				if dhp.isAuthProxy {
-					proxyURL := "http://" + dhp.ip + ":" + dhp.port
-					u, _ := url.ParseRequestURI(proxyURL)
-					u.User = url.UserPassword(dhp.username, dhp.password)
-					return u, nil
-				} else {
-					u, _ := url.ParseRequestURI(dhp.proxyURL)
-					return u, nil
-				}
-
-			}
-		}
-
+func (r *Request) proxyFunc(req *http.Request) (*url.URL, error) {
+	if req == nil || req.URL == nil || len(httpProxys) == 0 {
 		return nil, nil
 	}
+
+	hp, ok := httpProxys[req.URL.Hostname()]
+	if ok {
+		if hp.IsZero() {
+			return nil, nil
+		}
+	} else {
+		hp, ok = httpProxys[defaultProxyKey]
+		if !ok || hp.IsZero() {
+			return nil, nil
+		}
+	}
+
+	if hp.isAuthProxy {
+		proxyURL := "http://" + hp.ip + ":" + hp.port
+		u, _ := url.ParseRequestURI(proxyURL)
+		u.User = url.UserPassword(hp.username, hp.password)
+		return u, nil
+	}
+
+	u, _ := url.ParseRequestURI(hp.proxyURL)
+	return u, nil
 }
 
 func (r *Request) Do() (*Response, error) {
