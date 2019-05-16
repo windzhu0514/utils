@@ -1,18 +1,3 @@
-// 重试
-// 支持debug模式https://github.com/kirinlabs/HttpRequest 打印请求和请求的ID
-// 文件上传
-// requestwithcontext
-
-// 参数按添加顺序发送
-// 连接复用
-// head不自动规范化
-// 设置代理
-// 设置单个请求的超时时间
-// 设置重定向检查
-// request重复使用
-// post多种数据类型
-// body json解析 存入文件
-// 添加cookie
 package hihttp
 
 import (
