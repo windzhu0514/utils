@@ -1,6 +1,8 @@
 package utils
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestEqualFloat64(t *testing.T) {
 	type args struct {
@@ -13,7 +15,7 @@ func TestEqualFloat64(t *testing.T) {
 		want    int
 		wantErr bool
 	}{
-		{"one", args{52, "51"}, 1, false},
+		{"TestEqual", args{52, "51"}, 1, false},
 		{"one", args{52, "51.5"}, 1, false},
 		{"one", args{52.01, "51"}, 1, false},
 		{"one", args{52.01, "51.5"}, 1, false},

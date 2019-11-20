@@ -13,8 +13,9 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"math/big"
 
-	"github.com/satori/go.uuid"
+	uuid "github.com/satori/go.uuid"
 )
 
 // UUID 56bd51e2-fe5e-42cf-adf2-036c5e341d6c
@@ -165,4 +166,27 @@ func RsaDecrypt(ciphertext, privateKey []byte) ([]byte, error) {
 		return nil, err
 	}
 	return rsa.DecryptPKCS1v15(rand.Reader, priv, ciphertext)
+}
+
+func RSAEncryptNoPadding(origData, publicKey []byte) ([]byte, error) {
+	block, _ := pem.Decode(publicKey)
+	if block == nil {
+		return nil, errors.New("public key error")
+	}
+
+	pubInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	pub := pubInterface.(*rsa.PublicKey)
+
+	cipherText := origData
+	m := new(big.Int).SetBytes(cipherText)
+	e := big.NewInt(int64(pub.E))
+	return new(big.Int).Exp(m, e, pub.N).Bytes(), nil
+}
+
+func RSADecryptNoPadding(origData, publicKey []byte) ([]byte, error) {
+	return nil, nil
 }

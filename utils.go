@@ -1,15 +1,22 @@
 package utils
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
-	"reflect"
+	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/scanner"
 	"time"
+	"unicode"
 	"unsafe"
+
+	"github.com/skoo87/log4go"
 )
 
 // FormatJSONStr format no-stand json str
@@ -42,12 +49,12 @@ func FormatJSONStr(str string) (string, error) {
 // EqualFloat64 比较float64 f1 f2可以是字符串或者float64
 func EqualFloat64(f1 interface{}, f2 interface{}) (int, error) {
 
-	ff1, err := parseFloat64(f1)
+	ff1, err := Interface2Float64(f1)
 	if err != nil {
 		errMsg := fmt.Sprintf("parseFloat64 parse %v error:"+err.Error()+"\n", f1)
 		return 0, errors.New(errMsg)
 	}
-	ff2, err := parseFloat64(f2)
+	ff2, err := Interface2Float64(f2)
 	if err != nil {
 		errMsg := fmt.Sprintf("parseFloat64 parse %v error:"+err.Error()+"\n", f2)
 		return 0, errors.New(errMsg)
@@ -62,28 +69,29 @@ func EqualFloat64(f1 interface{}, f2 interface{}) (int, error) {
 	}
 }
 
-func parseFloat64(f interface{}) (float64, error) {
-	var ff float64
-
-	switch f.(type) {
-	case float64:
-		ff = f.(float64)
-	case float32:
-		ff = float64(f.(float32))
+func Interface2Float64(v interface{}) (fv float64, err error) {
+	switch vv := v.(type) {
 	case string:
-		v, err := strconv.ParseFloat(f.(string), 64)
+		fv, err = strconv.ParseFloat(vv, 64)
 		if err != nil {
-			return 0.0, err
+			return
 		}
-		ff = v
+		return
+	case float64:
+		fv = vv
+		return
+	case float32:
+		fv = float64(vv)
+		return
 	case int:
-		ff = float64(f.(int))
+		fv = float64(vv)
+		return
+	case int64:
+		fv = float64(vv)
+		return
 	default:
-		errMsg := fmt.Sprintf("%v:type is %v can't convert to float64", f, reflect.TypeOf(f))
-		return 0.0, errors.New(errMsg)
+		return fv, errors.New("格式不正确")
 	}
-
-	return ff, nil
 }
 
 // 从source里随机字符生成出长度为n的字符串
@@ -127,4 +135,131 @@ func wait(duration time.Duration) {
 		}
 	}
 
+}
+
+// 是否是中文
+func IsChinese(str string) bool {
+	for _, v := range str {
+		if !unicode.Is(unicode.Han, v) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func JsonMarshalNoError(v interface{}) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		log4go.Error("JsonMarshalNoError:%s", err.Error())
+		return ""
+	}
+
+	return string(data)
+}
+
+func JsonEncodeNoError(v interface{}, escapeHTML ...bool) string {
+	var buff bytes.Buffer
+	enc := json.NewEncoder(&buff)
+
+	if len(escapeHTML) > 0 {
+		enc.SetEscapeHTML(escapeHTML[0])
+	}
+
+	err := enc.Encode(v)
+	if err != nil {
+		log4go.Error("JsonEncodeNoError:%s", err.Error())
+		return ""
+	}
+
+	return buff.String()
+}
+
+var delimiter = []byte("\n")
+
+const base64MaxLenRFC2045 = 76
+
+// Base64WrapRFC2045 返回符合 RFC 2045 的Base64 encoded结果(每76个字符添加\n)
+func Base64WrapRFC2045(src []byte) (m string) {
+
+	m = base64.StdEncoding.EncodeToString(src)
+	the_len := len(m)
+
+	if the_len <= base64MaxLenRFC2045 {
+		return m
+	}
+
+	new_m := []byte(m)
+
+	// set the slice capacity to the slice len + each newline delimiters
+	m1 := make([]byte, 0, the_len+(len(delimiter)*int(the_len/base64MaxLenRFC2045)))
+	ii := 0
+	for i := 0; i < int(the_len/base64MaxLenRFC2045); i++ {
+		m1 = append(m1, new_m[i*base64MaxLenRFC2045:(i+1)*base64MaxLenRFC2045]...)
+		m1 = append(m1, delimiter...)
+		ii++
+	}
+	m1 = append(m1, new_m[ii*base64MaxLenRFC2045:the_len]...)
+	m = string(m1)
+	return m
+}
+
+// GenFakeMobile 生成假手机号
+func GenFakeMobile() string {
+	var MobileNOPrefix = [...]string{"187", "156", "189", "186", "137", "139", "135", "157", "188", "153", "183", "131", "177"}
+	rand.Seed(time.Now().UnixNano())
+	mobile := MobileNOPrefix[rand.Int()%len(MobileNOPrefix)]
+	mobile = mobile + fmt.Sprintf("%08d", rand.Int63n(99999999))
+
+	return mobile
+}
+
+// GenFakeEmail 生成假的email地址
+func GenFakeEmail(prefix string) string {
+	if prefix == "" {
+		prefix = GenFakeMobile()
+	}
+
+	mailDomains := []string{"163.com", "126.com", "sina.com.cn", "139.com", "yeah.net", "21cn.com", "sohu.com", "qq.com"}
+
+	index := rand.Intn(len(mailDomains))
+
+	return prefix + "@" + mailDomains[index]
+}
+
+// 函数执行时间
+// defer Elapsed.Stop()
+type elapsedTime struct {
+	start time.Time
+}
+
+func (e *elapsedTime) Stop() {
+	elapsed := time.Now().Sub(e.start)
+	pc, _, _, _ := runtime.Caller(1)
+	f := runtime.FuncForPC(pc)
+	fmt.Println(f.Name(), "耗时:", elapsed)
+}
+
+func Elapsed() interface {
+	Stop()
+} {
+	var e elapsedTime
+	e.start = time.Now()
+	return &e
+}
+
+func LocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, address := range addrs {
+		// check the address type and if it is not a loopback the display it
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return ""
 }
