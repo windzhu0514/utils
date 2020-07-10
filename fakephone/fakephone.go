@@ -11,7 +11,6 @@ import (
 	"time"
 
 	uuid "github.com/satori/go.uuid"
-	"github.com/skoo87/log4go"
 )
 
 func RandMac() string {
@@ -19,7 +18,6 @@ func RandMac() string {
 
 	_, err := cryptorand.Read(buf)
 	if err != nil {
-		log4go.Error("get randrom fail")
 		return ""
 
 	}
@@ -114,12 +112,7 @@ func SerialNumber() string {
 
 // UUID 56bd51e2-fe5e-42cf-adf2-036c5e341d6c
 func UUID() string {
-	uuid, err := uuid.NewV4()
-	if err != nil {
-		return ""
-	}
-
-	return uuid.String()
+	return uuid.NewV4().String()
 }
 
 // 生成DeviceID

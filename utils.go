@@ -20,8 +20,8 @@ import (
 )
 
 // FormatJSONStr format no-stand json str
-func FormatJSONStr(str string) (string, error) {
-	replacer := strings.NewReplacer("\t", "", "\n", "", "\v", "", "\f", "", "\r", "", " ", "", "'", "\"")
+func FormatJSONStr(str string) string {
+	replacer := strings.NewReplacer("\t", "", "\n", "", "\v", "", "\f", "", "\r", "", " ", "")
 	str = replacer.Replace(str)
 
 	var s scanner.Scanner
@@ -31,7 +31,8 @@ func FormatJSONStr(str string) (string, error) {
 	for s.Scan() != scanner.EOF {
 		token := s.TokenText()
 
-		if s.Peek() == ':' {
+		next := s.Peek()
+		if next == ':' {
 			if !strings.HasPrefix(token, "\"") {
 				token = "\"" + token
 			}
@@ -40,10 +41,16 @@ func FormatJSONStr(str string) (string, error) {
 			}
 		}
 
+		if next == ']' || next == '}' {
+			if token == "," {
+				continue
+			}
+		}
+
 		retStr += token
 	}
 
-	return retStr, nil
+	return retStr
 }
 
 // EqualFloat64 比较float64 f1 f2可以是字符串或者float64
