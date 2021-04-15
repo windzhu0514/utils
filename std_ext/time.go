@@ -1,4 +1,4 @@
-package xtime
+package std_ext
 
 import "time"
 

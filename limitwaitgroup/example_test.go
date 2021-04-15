@@ -14,7 +14,7 @@ func work() {
 func TestLimitGo(t *testing.T) {
 	lwg := New(5)
 	for i := 0; i < 20; i++ {
-		lwg.Add(1)
+		lwg.Add()
 		go func() { work(); lwg.Done() }()
 	}
 

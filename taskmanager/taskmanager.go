@@ -69,8 +69,6 @@ func (job *Job) Run() {
 	job.task.Run(job.JobContext)
 	job.wgWorker.Wait()
 	delete(manager.jobs, job.JobContext.Key)
-
-	return
 }
 
 func Start(key string, opts TaskOptions, task Task) error {

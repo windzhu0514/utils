@@ -8,15 +8,12 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"runtime"
 	"strconv"
 	"strings"
 	"text/scanner"
 	"time"
 	"unicode"
 	"unsafe"
-
-	"github.com/skoo87/log4go"
 )
 
 // FormatJSONStr format no-stand json str
@@ -158,7 +155,6 @@ func IsChinese(str string) bool {
 func JsonMarshalNoError(v interface{}) string {
 	data, err := json.Marshal(v)
 	if err != nil {
-		log4go.Error("JsonMarshalNoError:%s", err.Error())
 		return ""
 	}
 
@@ -175,7 +171,6 @@ func JsonEncodeNoError(v interface{}, escapeHTML ...bool) string {
 
 	err := enc.Encode(v)
 	if err != nil {
-		log4go.Error("JsonEncodeNoError:%s", err.Error())
 		return ""
 	}
 
@@ -232,27 +227,6 @@ func GenFakeEmail(prefix string) string {
 	index := rand.Intn(len(mailDomains))
 
 	return prefix + "@" + mailDomains[index]
-}
-
-// 函数执行时间
-// defer Elapsed.Stop()
-type elapsedTime struct {
-	start time.Time
-}
-
-func (e *elapsedTime) Stop() {
-	elapsed := time.Now().Sub(e.start)
-	pc, _, _, _ := runtime.Caller(1)
-	f := runtime.FuncForPC(pc)
-	fmt.Println(f.Name(), "耗时:", elapsed)
-}
-
-func Elapsed() interface {
-	Stop()
-} {
-	var e elapsedTime
-	e.start = time.Now()
-	return &e
 }
 
 func LocalIP() string {

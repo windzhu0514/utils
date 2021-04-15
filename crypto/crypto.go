@@ -1,9 +1,6 @@
-// https://github.com/wumansgy/goEncrypt
-// https://github.com/thinkoner/openssl
 package crypto
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"
@@ -12,385 +9,663 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"io"
-	"math/big"
+	"fmt"
+	"strings"
 
-	"windzhu0514/go-utils/crypto/ecbcipher"
+	"github.com/windzhu0514/go-utils/crypto/ecb"
+	"github.com/windzhu0514/go-utils/crypto/rsa_ext"
 )
+
+type BlockMode string
 
 const (
-	ModeECB = 1 << iota
-	ModeCBC
-	ModePCBC
-	ModeCFB
-	ModeOFB
-	ModeCTR
-	PaddingNo
-	PaddingBit
-	PaddingPKCS7 // 等同于PaddingPKCS5
-	PaddingZero
+	BlockModeECB = BlockMode("ECB")
+	BlockModeCBC = BlockMode("CBC")
+	BlockModeCFB = BlockMode("CFB")
+	BlockModeCTR = BlockMode("CTR")
+	BlockModeGCM = BlockMode("GCM")
+	BlockModeOFB = BlockMode("OFB")
 )
 
-// pkcs5作为pkcs7的子集算法，使用上没有什么区别，只是在blockSize上固定为 8 bytes，即数据始终会被切割成 8 个字节的数据块，然后计算需要填充的长度。pkcs7的填充长度blockSize是 1~255 bytes
+type Algorithm string
 
-// PKCS5与PKCS7的区别：PKCS5用于块大小8Byte PKCS7用于块大小1-255Byte
-// https://en.wikipedia.org/wiki/Padding_%28cryptography%29#PKCS#5_and_PKCS#7
-// PKCS #5:https://www.ietf.org/rfc/rfc2898.txt
-// PKCS #7:https://www.ietf.org/rfc/rfc2315.txt
+const (
+	AlgorithmAES       = Algorithm("AES")
+	AlgorithmDES       = Algorithm("DES")
+	AlgorithmTripleDES = Algorithm("TripleDES")
+	AlgorithmRSA       = Algorithm("RSA")
+)
 
-type PaddingMode interface {
-	Padding(src []byte, blockSize int) []byte
-	UnPadding(src []byte) []byte
+type PaddingMode string
+
+const (
+	PaddingModeNone  = PaddingMode("NoPadding")
+	PaddingModePKCS7 = PaddingMode("PKCS7Padding")
+	PaddingModeZero  = PaddingMode("ZerosPadding")
+)
+
+var (
+	ErrKeyIsEmpty   = errors.New("crypto: key is empty")
+	ErrIVIsEmpty    = errors.New("crypto: iv is empty")
+	ErrNonceIsEmpty = errors.New("crypto: nonce is empty")
+	ErrBlockMode    = errors.New("crypto: invalid block mode")
+	ErrPaddingkMode = errors.New("crypto: invalid padding mode")
+)
+
+type Cipher struct {
+	Algorithm      Algorithm
+	BlockMode      BlockMode
+	PaddingMode    PaddingMode
+	Key            []byte // 对称加密Key或者公钥私钥
+	IV             []byte
+	Nonce          []byte
+	AdditionalData []byte
+	TagSize        int
 }
 
-type NoPadding struct{}
-
-func (NoPadding) Padding(src []byte, blockSize int) []byte {
-	return src
-}
-
-func (NoPadding) UnPadding(src []byte) []byte {
-	return src
-}
-
-type PKCS7Padding struct{}
-
-func (PKCS7Padding) Padding(src []byte, blockSize int) []byte {
-	padding := blockSize - len(src)%blockSize
-	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
-	return append(src, padtext...)
-}
-
-func (PKCS7Padding) UnPadding(src []byte) []byte {
-	length := len(src)
-	unpadding := int(src[length-1])
-	return src[:(length - unpadding)]
-}
-
-type ZeroPadding struct{}
-
-func (ZeroPadding) Padding(src []byte, blockSize int) []byte {
-	padding := blockSize - len(src)%blockSize
-	padtext := bytes.Repeat([]byte{byte(0)}, padding)
-	return append(src, padtext...)
-}
-
-func (ZeroPadding) UnPadding(src []byte) []byte {
-	length := len(src)
-	unpadding := int(src[length-1])
-	return src[:(length - unpadding)]
-}
-
-func newBlockEncrypter(b cipher.Block, iv []byte, flag int) interface{} {
-	flag = flag & 0xFF
-	switch flag {
-	case ModeECB:
-		return ecbcipher.NewECBEncrypter(b)
-	case ModeCBC:
-		return cipher.NewCBCEncrypter(b, iv)
-	case ModePCBC:
-		return nil
-	case ModeCFB:
-		return cipher.NewCFBEncrypter(b, iv)
-	case ModeOFB:
-		return cipher.NewOFB(b, iv)
-	case ModeCTR:
-		return cipher.NewCTR(b, iv)
-	default:
-		return cipher.NewCBCEncrypter(b, iv)
+func (c *Cipher) Encrypt(plainTxt []byte) ([]byte, error) {
+	if len(c.Key) == 0 {
+		return nil, ErrKeyIsEmpty
 	}
-}
 
-func newBlockDecrypter(b cipher.Block, iv []byte, flag int) interface{} {
-	flag = flag & 0xFF
-	switch flag {
-	case ModeECB:
-		return ecbcipher.NewECBDecrypter(b)
-	case ModeCBC:
-		return cipher.NewCBCDecrypter(b, iv)
-	case ModePCBC:
-		return nil
-	case ModeCFB:
-		return cipher.NewCFBDecrypter(b, iv)
-	case ModeOFB:
-		return cipher.NewOFB(b, iv)
-	case ModeCTR:
-		return cipher.NewCTR(b, iv)
-	default:
-		return cipher.NewCBCDecrypter(b, iv)
-	}
-}
+	var (
+		block cipher.Block
+		err   error
+	)
 
-func paddingMode(flag int) PaddingMode {
-	flag = flag & 0xFF00
-	switch flag {
-	// case PaddingBit:
-	// 	return NonePadding{}
-	case PaddingPKCS7:
-		return PKCS7Padding{}
-	case PaddingZero:
-		return ZeroPadding{}
-	default:
-		return NoPadding{}
-	}
-}
+	switch c.Algorithm {
+	case AlgorithmAES:
+		block, err = aes.NewCipher(c.Key)
+		if err != nil {
+			return nil, err
+		}
+	case AlgorithmDES:
+		block, err = des.NewCipher(c.Key)
+		if err != nil {
+			return nil, err
+		}
+	case AlgorithmTripleDES:
+		block, err = des.NewTripleDESCipher(c.Key)
+		if err != nil {
+			return nil, fmt.Errorf("%w, TripleDES key size is 24", err)
+		}
+	case AlgorithmRSA:
+		block, _ := pem.Decode(c.Key)
+		if block == nil {
+			return nil, errors.New("failed to decode PEM block")
+		}
 
-// 块加密
-func blockEncrypt(block cipher.Block, plaintext, iv []byte, flag int) ([]byte, error) {
-	plaintext = paddingMode(flag).Padding(plaintext, des.BlockSize)
-
-	var ciphertext []byte
-	if flag&0xFF != ModeECB {
-		ciphertext = make([]byte, des.BlockSize+len(plaintext))
-		if iv == nil {
-			iv := ciphertext[:des.BlockSize]
-			if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-				return nil, nil
+		if block.Type == "PUBLIC KEY" {
+			pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+			if err != nil {
+				return nil, err
 			}
+
+			return rsa.EncryptPKCS1v15(rand.Reader, pub.(*rsa.PublicKey), plainTxt)
+		} else if block.Type == "PRIVATE KEY" || strings.HasSuffix(block.Type, " PRIVATE KEY") {
+			priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+			if err != nil {
+				keyPKCS8, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+				if err != nil {
+					return nil, err
+				}
+
+				priv = keyPKCS8.(*rsa.PrivateKey)
+			}
+
+			return rsa_ext.PrivateKeyEncrypt(rand.Reader, priv, plainTxt)
+		} else if block.Type == "CERTIFICATE" {
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+
+			return rsa.EncryptPKCS1v15(rand.Reader, cert.PublicKey.(*rsa.PublicKey), plainTxt)
 		} else {
-			if len(iv) != des.BlockSize {
-				return nil, errors.New("IV length must equal block size")
+			return nil, errors.New("invalid PEM block type")
+		}
+
+	default:
+		return nil, fmt.Errorf("crypto: not supported algorithm:%s", c.Algorithm)
+	}
+
+	switch c.PaddingMode {
+	case PaddingModeNone:
+	case PaddingModePKCS7:
+		plainTxt = PKCS7Padding{}.Padding(plainTxt, block.BlockSize())
+	case PaddingModeZero:
+		plainTxt = ZerosPadding{}.Padding(plainTxt, block.BlockSize())
+	}
+
+	switch c.BlockMode {
+	case BlockModeECB:
+		blockMode := ecb.NewECBEncrypter(block)
+		dst := make([]byte, len(plainTxt))
+		blockMode.CryptBlocks(dst, plainTxt)
+		return dst, nil
+
+	case BlockModeCBC:
+		if len(c.IV) == 0 {
+			return nil, ErrIVIsEmpty
+		}
+
+		dst := make([]byte, block.BlockSize()+len(plainTxt))
+		copy(dst[:block.BlockSize()], c.IV)
+		blockMode := cipher.NewCBCEncrypter(block, c.IV)
+		blockMode.CryptBlocks(dst[block.BlockSize():], plainTxt)
+		return dst, nil
+
+	case BlockModeCFB:
+		if len(c.IV) == 0 {
+			return nil, ErrIVIsEmpty
+		}
+
+		dst := make([]byte, block.BlockSize()+len(plainTxt))
+		copy(dst[:block.BlockSize()], c.IV)
+		cfb := cipher.NewCFBEncrypter(block, c.IV)
+		cfb.XORKeyStream(dst, plainTxt)
+		return dst, nil
+
+	case BlockModeCTR:
+		if len(c.IV) == 0 {
+			return nil, ErrIVIsEmpty
+		}
+
+		dst := make([]byte, block.BlockSize()+len(plainTxt))
+		copy(dst[:block.BlockSize()], c.IV)
+		ctr := cipher.NewCTR(block, c.IV)
+		ctr.XORKeyStream(dst, plainTxt)
+		return dst, nil
+
+	case BlockModeGCM:
+		if len(c.Nonce) == 0 {
+			return nil, ErrNonceIsEmpty
+		}
+
+		var aesgcm cipher.AEAD
+		if c.TagSize != 0 {
+			aesgcm, err = cipher.NewGCMWithTagSize(block, c.TagSize)
+		} else {
+			aesgcm, err = cipher.NewGCMWithNonceSize(block, len(c.Nonce))
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		return aesgcm.Seal(nil, c.Nonce, plainTxt, c.AdditionalData), nil
+	case BlockModeOFB:
+		if len(c.IV) == 0 {
+			return nil, ErrIVIsEmpty
+		}
+		dst := make([]byte, block.BlockSize()+len(plainTxt))
+		copy(dst[:block.BlockSize()], c.IV)
+		ofb := cipher.NewOFB(block, c.IV)
+		ofb.XORKeyStream(plainTxt[block.BlockSize():], plainTxt)
+		return dst, nil
+	default:
+		return nil, ErrBlockMode
+	}
+}
+
+func (c *Cipher) Decrypt(cipherTxt []byte) ([]byte, error) {
+	if len(c.Key) == 0 {
+		return nil, ErrKeyIsEmpty
+	}
+
+	var (
+		block cipher.Block
+		err   error
+	)
+
+	switch c.Algorithm {
+	case AlgorithmAES:
+		block, err = aes.NewCipher(c.Key)
+		if err != nil {
+			return nil, err
+		}
+	case AlgorithmDES:
+		block, err = des.NewCipher(c.Key)
+		if err != nil {
+			return nil, err
+		}
+	case AlgorithmTripleDES:
+		block, err = des.NewTripleDESCipher(c.Key)
+		if err != nil {
+			return nil, fmt.Errorf("%w, TripleDES key size is 24", err)
+		}
+	case AlgorithmRSA:
+		block, _ := pem.Decode(c.Key)
+		if block == nil {
+			return nil, errors.New("failed to decode PEM block")
+		}
+
+		if block.Type == "PUBLIC KEY" {
+			pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			return rsa_ext.PublicKeyDecrypt(pub.(*rsa.PublicKey), cipherTxt)
+		} else if block.Type == "PRIVATE KEY" || strings.HasSuffix(block.Type, " PRIVATE KEY") {
+			priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+			if err != nil {
+				keyPKCS8, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+				if err != nil {
+					return nil, err
+				}
+
+				priv = keyPKCS8.(*rsa.PrivateKey)
 			}
 
-			copy(ciphertext[:des.BlockSize], iv)
+			return rsa.DecryptPKCS1v15(rand.Reader, priv, cipherTxt)
+		} else if block.Type == "CERTIFICATE" {
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+
+			return rsa_ext.PublicKeyDecrypt(cert.PublicKey.(*rsa.PublicKey), cipherTxt)
+		} else {
+			return nil, errors.New("invalid PEM block type")
 		}
 
-	} else {
-		ciphertext = make([]byte, len(plaintext))
+	default:
+		return nil, fmt.Errorf("crypto: not supported algorithm:%s", c.Algorithm)
 	}
 
-	encrypter := newBlockEncrypter(block, iv, flag)
-	if blockMode, ok := encrypter.(cipher.BlockMode); ok {
-		blockMode.CryptBlocks(ciphertext[des.BlockSize:], plaintext)
-	}
-	if stream, ok := encrypter.(cipher.Stream); ok {
-		stream.XORKeyStream(ciphertext[:des.BlockSize], plaintext)
-	}
+	if c.BlockMode != BlockModeGCM {
+		if len(cipherTxt) < block.BlockSize() {
+			return nil, errors.New("input too short")
+		}
 
-	return ciphertext, nil
-}
-
-// 块解密
-func blockDecrypt(block cipher.Block, ciphertext, iv []byte, flag int) ([]byte, error) {
-	if flag&0xFF != ModeECB {
-		if iv == nil {
-			iv = ciphertext[:des.BlockSize]
-			ciphertext = ciphertext[des.BlockSize:]
+		if len(cipherTxt)%block.BlockSize() != 0 {
+			return nil, errors.New("input not full blocks")
 		}
 	}
 
-	if len(ciphertext)%des.BlockSize != 0 {
-		return nil, errors.New("DesDecrypt:input not full blocks")
+	var dst []byte
+	switch c.BlockMode {
+	case BlockModeECB:
+		blockMode := ecb.NewECBDecrypter(block)
+		dst = make([]byte, len(cipherTxt))
+		blockMode.CryptBlocks(dst, cipherTxt)
+
+	case BlockModeCBC:
+		iv := cipherTxt[:block.BlockSize()]
+		if len(c.IV) != 0 {
+			iv = c.IV
+		}
+
+		cipherTxt = cipherTxt[block.BlockSize():]
+		dst = make([]byte, len(cipherTxt))
+		blockMode := cipher.NewCBCDecrypter(block, iv)
+		blockMode.CryptBlocks(dst, cipherTxt)
+
+	case BlockModeCFB:
+		iv := cipherTxt[:block.BlockSize()]
+		if len(c.IV) != 0 {
+			iv = c.IV
+		}
+
+		cipherTxt = cipherTxt[block.BlockSize():]
+		dst = make([]byte, len(cipherTxt))
+		cfb := cipher.NewCFBDecrypter(block, iv)
+		cfb.XORKeyStream(dst, cipherTxt)
+
+	case BlockModeCTR:
+		iv := cipherTxt[:block.BlockSize()]
+		if len(c.IV) != 0 {
+			iv = c.IV
+		}
+
+		cipherTxt = cipherTxt[block.BlockSize():]
+		dst = make([]byte, len(cipherTxt))
+		ctr := cipher.NewCTR(block, iv)
+		ctr.XORKeyStream(dst, cipherTxt)
+
+	case BlockModeGCM:
+		if len(c.Nonce) == 0 {
+			return nil, ErrNonceIsEmpty
+		}
+
+		var aesgcm cipher.AEAD
+		if c.TagSize != 0 {
+			aesgcm, err = cipher.NewGCMWithTagSize(block, c.TagSize)
+		} else {
+			aesgcm, err = cipher.NewGCMWithNonceSize(block, len(c.Nonce))
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		return aesgcm.Open(nil, c.Nonce, cipherTxt, c.AdditionalData)
+
+	case BlockModeOFB:
+		iv := cipherTxt[:block.BlockSize()]
+		if len(c.IV) != 0 {
+			iv = c.IV
+		}
+
+		cipherTxt = cipherTxt[block.BlockSize():]
+		dst = make([]byte, len(cipherTxt))
+
+		ofb := cipher.NewOFB(block, iv)
+		ofb.XORKeyStream(dst, cipherTxt)
+		return dst, nil
+
+	default:
+		return nil, ErrBlockMode
 	}
 
-	decrypter := newBlockDecrypter(block, iv, flag)
-	if blockMode, ok := decrypter.(cipher.BlockMode); ok {
-		blockMode.CryptBlocks(ciphertext, ciphertext)
-	}
-	if stream, ok := decrypter.(cipher.Stream); ok {
-		stream.XORKeyStream(ciphertext, ciphertext)
+	switch c.PaddingMode {
+	case PaddingModeNone:
+	case PaddingModePKCS7:
+		dst, err = PKCS7Padding{}.UnPadding(dst, block.BlockSize())
+		if err != nil {
+			return nil, err
+		}
+	case PaddingModeZero:
+		dst, err = ZerosPadding{}.UnPadding(dst)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	ciphertext = paddingMode(flag).UnPadding(ciphertext)
-
-	return ciphertext, nil
+	return dst, nil
 }
 
-// DES
-// 可被破解，建议使用3DES或者AES代替
-// ----------------------------------------------------------------------
-
-// DESEncrypt用于DES加密 支持的块加密模式：ECB/CBC/CFB/OFB/CTR 支持的填充模式：NonePadding/PKCS7Padding/ZeroPadding
-// DESEncrypt([]byte("exampletext"),[]byte("key"),0) DES/CBC/NonePadding
-// DESEncrypt([]byte("exampletext"),[]byte("key"),ModeECB|PaddingPKCS7) DES/ECB/PaddingPKCS7
-func DESEncrypt(plaintext, key []byte, flag int) ([]byte, error) {
-	block, err := des.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockEncrypt(block, plaintext, nil, flag)
-}
-
-// DESDecrypt用于DES解密 支持的块加密模式：ECB/CBC/CFB/OFB/CTR 支持的填充模式：NonePadding/PKCS7Padding/ZeroPadding
-// DESDecrypt([]byte("ciphertext"),[]byte("key"),0) DES/CBC/NonePadding
-// DESDecrypt([]byte("ciphertext"),[]byte("key"),ModeECB|PaddingPKCS7) DES/ECB/PaddingPKCS7
-func DESDecrypt(ciphertext, key []byte, flag int) ([]byte, error) {
-	block, err := des.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockDecrypt(block, ciphertext, nil, flag)
-}
-
-func DESEncryptWithIV(plaintext, key, iv []byte, flag int) ([]byte, error) {
-	block, err := des.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockEncrypt(block, plaintext, iv, flag)
-}
-
-func DESDecryptWithIV(ciphertext, key, iv []byte, flag int) ([]byte, error) {
-	block, err := des.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockDecrypt(block, ciphertext, iv, flag)
-}
-
-// TripleDESEncrypt用于3重DES加密 支持的块加密模式：ECB/CBC/CFB/OFB/CTR 支持的填充模式：NonePadding/PKCS7Padding/ZeroPadding
-// TripleDESEncrypt([]byte("exampletext"),[]byte("key"),0) DES/CBC/NonePadding
-// TripleDESEncrypt([]byte("exampletext"),[]byte("key"),ModeECB|PaddingPKCS7) DES/ECB/PaddingPKCS7
-func TripleDESEncrypt(plaintext, key []byte, flag int) ([]byte, error) {
-	block, err := des.NewTripleDESCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockEncrypt(block, plaintext, nil, flag)
-}
-
-// TripleDESDecrypt用于3重DES解密 支持的块加密模式：ECB/CBC/CFB/OFB/CTR 支持的填充模式：NonePadding/PKCS7Padding/ZeroPadding
-// TripleDESDecrypt([]byte("ciphertext"),[]byte("key"),0) DES/CBC/NonePadding
-// TripleDESDecrypt([]byte("ciphertext"),[]byte("key"),ModeECB|PaddingPKCS7) DES/ECB/PaddingPKCS7
-func TripleDESDecrypt(ciphertext, key []byte, flag int) ([]byte, error) {
-	block, err := des.NewTripleDESCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockDecrypt(block, ciphertext, nil, flag)
-}
-
-func TripleDESEncryptWithIV(plaintext, key, iv []byte, flag int) ([]byte, error) {
-	block, err := des.NewTripleDESCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockEncrypt(block, plaintext, iv, flag)
-}
-
-func TripleDESDecryptWithIV(ciphertext, key, iv []byte, flag int) ([]byte, error) {
-	block, err := des.NewTripleDESCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockDecrypt(block, ciphertext, iv, flag)
-}
-
-// AES
-// ----------------------------------------------------------------------
-
-// AESEncrypt用于AES加密 支持的块加密模式：ECB/CBC/CFB/OFB/CTR 支持的填充模式：NonePadding/PKCS7Padding/ZeroPadding
-// AESEncrypt([]byte("exampletext"),[]byte("key"),0) AES/CBC/NonePadding
-// AESEncrypt([]byte("exampletext"),[]byte("key"),ModeECB|PaddingPKCS7) AES/ECB/PaddingPKCS7
-func AESEncrypt(plaintext, key []byte, flag int) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockEncrypt(block, plaintext, nil, flag)
-}
-
-// AESDecrypt用于AES解密 支持的块加密模式：ECB/CBC/CFB/OFB/CTR 支持的填充模式：NonePadding/PKCS7Padding/ZeroPadding
-// AESDecrypt([]byte("ciphertext"),[]byte("key"),0) AES/CBC/NonePadding
-// AESDecrypt([]byte("ciphertext"),[]byte("key"),ModeECB|PaddingPKCS7) AES/ECB/PaddingPKCS7
-func AESDecrypt(ciphertext, key []byte, flag int) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockDecrypt(block, ciphertext, nil, flag)
-}
-
-func AESEncryptWithIV(plaintext, key, iv []byte, flag int) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockEncrypt(block, plaintext, nil, flag)
-}
-
-func AESDecryptWithIV(ciphertext, key []byte, flag int) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return blockDecrypt(block, ciphertext, nil, flag)
-}
-
-// RSAEncrypt用于RSA公钥加密
-func RSAEncrypt(plaintext, publicKey []byte) ([]byte, error) {
-	block, _ := pem.Decode(publicKey)
-	if block == nil {
-		return nil, errors.New("public key error")
-	}
-
-	pubInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-
-	pub := pubInterface.(*rsa.PublicKey)
-	return rsa.EncryptPKCS1v15(rand.Reader, pub, plaintext)
-}
-
-// RSADecrypt用于RSA私钥解密
-func RSADecrypt(ciphertext, privateKey []byte) ([]byte, error) {
-	block, _ := pem.Decode(privateKey)
-	if block == nil {
-		return nil, errors.New("private key error!")
-	}
-
-	priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-
-	return rsa.DecryptPKCS1v15(rand.Reader, priv, ciphertext)
-}
-
-// RSAEncryptNoPadding RSA无填充公钥加密
-func RSAEncryptNoPadding(plaintext, publicKey []byte) ([]byte, error) {
-	block, _ := pem.Decode(publicKey)
-	if block == nil {
-		return nil, errors.New("public key error")
-	}
-
-	pubInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-
-	pub := pubInterface.(*rsa.PublicKey)
-
-	cipherText := plaintext
-	m := new(big.Int).SetBytes(cipherText)
-	e := big.NewInt(int64(pub.E))
-	return new(big.Int).Exp(m, e, pub.N).Bytes(), nil
-}
-
-// TODO:RSADecryptNoPadding RSA无填充私钥解密
-func RSADecryptNoPadding(ciphertext, privateKey []byte) ([]byte, error) {
-	// block, _ := pem.Decode(privateKey)
-	// if block == nil {
-	// 	return nil, errors.New("private key error!")
-	// }
-	//
-	// priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	//
-	return nil, nil
-}
+//func AESCBCEncrypt(plainTxt, key []byte, padding PaddingMode) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if padding != nil {
+//		plainTxt = padding.Padding(plainTxt, block.BlockSize())
+//	}
+//
+//	// The IV needs to be unique, but not secure. Therefore it's common to
+//	// include it at the beginning of the ciphertext.
+//	dst := make([]byte, block.BlockSize()+len(plainTxt))
+//	iv := dst[:block.BlockSize()]
+//	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+//		return nil, err
+//	}
+//
+//	blockMode := cipher.NewCBCEncrypter(block, iv)
+//	blockMode.CryptBlocks(dst[block.BlockSize():], plainTxt)
+//
+//	return dst, nil
+//}
+//
+//func AESCBCDecrypt(cipherTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if len(cipherTxt) < block.BlockSize() {
+//		return nil, errors.New("ciphertext too short")
+//	}
+//
+//	if len(cipherTxt)%block.BlockSize() != 0 {
+//		return nil, errors.New("gocrypto/cipher: input not full blocks")
+//	}
+//
+//	iv := cipherTxt[:block.BlockSize()]
+//	cipherTxt = cipherTxt[block.BlockSize():]
+//
+//	blockMode := cipher.NewCBCDecrypter(block, iv)
+//
+//	dst := make([]byte, len(cipherTxt))
+//	blockMode.CryptBlocks(dst, cipherTxt)
+//
+//	if padding != nil {
+//		dst = padding.UnPadding(dst)
+//	}
+//
+//	return dst, nil
+//}
+//
+//func AESECBEncrypt(plainTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if padding != nil {
+//		plainTxt = padding.Padding(plainTxt, block.BlockSize())
+//	}
+//
+//	dst := make([]byte, len(plainTxt))
+//	blockMode := ecb.NewECBEncrypter(block)
+//	blockMode.CryptBlocks(dst, plainTxt)
+//
+//	return dst, nil
+//}
+//
+//func AESECBDecrypt(cipherTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if len(cipherTxt)%block.BlockSize() != 0 {
+//		return nil, errors.New("gocrypto/cipher: input not full blocks")
+//	}
+//
+//	dst := make([]byte, len(cipherTxt))
+//	blockMode := ecb.NewECBDecrypter(block)
+//	blockMode.CryptBlocks(dst, cipherTxt)
+//
+//	if padding != nil {
+//		dst = padding.UnPadding(dst)
+//	}
+//
+//	return dst, nil
+//}
+//
+//func AESCFBEncrypt(plainTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if padding != nil {
+//		plainTxt = padding.Padding(plainTxt, block.BlockSize())
+//	}
+//
+//	// The IV needs to be unique, but not secure. Therefore it's common to
+//	// include it at the beginning of the ciphertext.
+//	dst := make([]byte, block.BlockSize()+len(plainTxt))
+//	iv := dst[:block.BlockSize()]
+//	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+//		return nil, err
+//	}
+//
+//	cfb := cipher.NewCFBEncrypter(block, iv)
+//	cfb.XORKeyStream(dst, plainTxt)
+//
+//	return dst, nil
+//}
+//
+//func AESCFBDecrypt(cipherTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if len(cipherTxt) < block.BlockSize() {
+//		return nil, errors.New("ciphertext too short")
+//	}
+//
+//	if len(cipherTxt)%block.BlockSize() != 0 {
+//		return nil, errors.New("gocrypto/cipher: input not full blocks")
+//	}
+//
+//	iv := cipherTxt[:block.BlockSize()]
+//	cipherTxt = cipherTxt[block.BlockSize():]
+//
+//	cfb := cipher.NewCFBDecrypter(block, iv)
+//
+//	dst := make([]byte, len(cipherTxt))
+//	cfb.XORKeyStream(dst, cipherTxt)
+//
+//	if padding != nil {
+//		dst = padding.UnPadding(dst)
+//	}
+//
+//	return dst, nil
+//}
+//
+//func AESCTREncrypt(plainTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if padding != nil {
+//		plainTxt = padding.Padding(plainTxt, block.BlockSize())
+//	}
+//
+//	// The IV needs to be unique, but not secure. Therefore it's common to
+//	// include it at the beginning of the ciphertext.
+//	dst := make([]byte, block.BlockSize()+len(plainTxt))
+//	iv := dst[:block.BlockSize()]
+//	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+//		return nil, err
+//	}
+//
+//	ctr := cipher.NewCTR(block, iv)
+//	ctr.XORKeyStream(dst, plainTxt)
+//
+//	return dst, nil
+//}
+//
+//func AESCTRDecrypt(cipherTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if len(cipherTxt) < block.BlockSize() {
+//		return nil, errors.New("ciphertext too short")
+//	}
+//
+//	if len(cipherTxt)%block.BlockSize() != 0 {
+//		return nil, errors.New("gocrypto/cipher: input not full blocks")
+//	}
+//
+//	iv := cipherTxt[:block.BlockSize()]
+//	cipherTxt = cipherTxt[block.BlockSize():]
+//
+//	ctr := cipher.NewCTR(block, iv)
+//
+//	dst := make([]byte, len(cipherTxt))
+//	ctr.XORKeyStream(dst, cipherTxt)
+//
+//	if padding != nil {
+//		dst = padding.UnPadding(dst)
+//	}
+//
+//	return dst, nil
+//}
+//
+//func AESGCMEncrypt(plainTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if padding != nil {
+//		plainTxt = padding.Padding(plainTxt, block.BlockSize())
+//	}
+//
+//	dst := make([]byte, len(plainTxt))
+//	aesgcm, err := cipher.NewGCM(block)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	nonce := make([]byte, 12)
+//	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+//		panic(err.Error())
+//	}
+//
+//	dst = aesgcm.Seal(nil, nonce, plainTxt, nil)
+//
+//	return dst, nil
+//}
+//
+//func AESGCMDecrypt(cipherTxt, key, nonce []byte) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if len(nonce) != 12 {
+//		return nil, errors.New("incorrect nonce length given to GCM")
+//	}
+//
+//	aesgcm, err := cipher.NewGCM(block)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	plaintext, err := aesgcm.Open(nil, nonce, cipherTxt, nil)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	return plaintext, nil
+//}
+//
+//func AESOFBEncrypt(plainTxt, key []byte, padding Padding) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if padding != nil {
+//		plainTxt = padding.Padding(plainTxt, block.BlockSize())
+//	}
+//
+//	// The IV needs to be unique, but not secure. Therefore it's common to
+//	// include it at the beginning of the ciphertext.
+//	ciphertext := make([]byte, block.BlockSize()+len(plainTxt))
+//	iv := ciphertext[:block.BlockSize()]
+//	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+//		panic(err)
+//	}
+//
+//	ofb := cipher.NewOFB(block, iv)
+//	ofb.XORKeyStream(ciphertext[block.BlockSize():], plainTxt)
+//
+//	return ciphertext, nil
+//}
+//
+//func AESOFBDecrypt(cipherTxt, key []byte) ([]byte, error) {
+//	block, err := aes.NewCipher(key)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if len(cipherTxt) < block.BlockSize() {
+//		return nil, errors.New("ciphertext too short")
+//	}
+//
+//	if len(cipherTxt)%block.BlockSize() != 0 {
+//		return nil, errors.New("gocrypto/cipher: input not full blocks")
+//	}
+//
+//	iv := cipherTxt[:block.BlockSize()]
+//	cipherTxt = cipherTxt[block.BlockSize():]
+//
+//	ofb := cipher.NewOFB(block, iv)
+//
+//	dst := make([]byte, len(cipherTxt))
+//	ofb.XORKeyStream(dst, cipherTxt)
+//
+//	return dst, nil
+//}
